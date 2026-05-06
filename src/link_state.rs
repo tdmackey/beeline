@@ -8,6 +8,7 @@ use std::time::Duration;
 
 type HmacSha256 = Hmac<Sha256>;
 const SIGNED_STATE_VERSION: &str = "v1";
+const MAX_FUTURE_STATE_SKEW_SECONDS: i64 = 300;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LinkState {
@@ -103,6 +104,13 @@ impl LinkState {
     fn validate_max_age(self, max_age: Duration) -> Result<Self> {
         let now = Utc::now().timestamp();
         let max_age_seconds = max_age.as_secs();
+        let future_skew_seconds = self.issued_at.saturating_sub(now);
+
+        if future_skew_seconds > MAX_FUTURE_STATE_SKEW_SECONDS {
+            return Err(Error::InvalidState(
+                "state issued_at is too far in the future".to_string(),
+            ));
+        }
 
         if now.saturating_sub(self.issued_at) > max_age_seconds as i64 {
             return Err(Error::ExpiredState {

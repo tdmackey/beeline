@@ -13,7 +13,7 @@ pub const DEFAULT_API_VERSION: &str = "20260506";
 const DEFAULT_API_BASE_URL: &str = "https://api.foursquare.com/v2/";
 const DEFAULT_OAUTH_AUTHORIZE_URL: &str = "https://foursquare.com/oauth2/authenticate";
 const DEFAULT_OAUTH_ACCESS_TOKEN_URL: &str = "https://foursquare.com/oauth2/access_token";
-const DEFAULT_USER_AGENT: &str = "beeline/0.1";
+const DEFAULT_USER_AGENT: &str = concat!("beeline/", env!("CARGO_PKG_VERSION"));
 const MAX_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone)]
@@ -432,11 +432,10 @@ mod tests {
         AccessToken, AuthorizationRequest, Error, LinkState, OAuthConfig,
         parse_authorization_callback,
     };
+    #[path = "../../../tests/common/mod.rs"]
+    mod common;
+    use common::{MockResponse, MockServer};
     use std::collections::BTreeMap;
-    use std::sync::Arc;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-    use tokio::sync::Mutex;
 
     const STATE_SIGNING_KEY: &[u8] = b"test-state-signing-key";
 
@@ -518,6 +517,15 @@ mod tests {
             LinkState::decode_with_max_age(expired, STATE_SIGNING_KEY, Duration::from_secs(60)),
             Err(Error::ExpiredState { .. })
         ));
+
+        let future = LinkState::new(123, "nonce")
+            .with_issued_at(chrono::Utc::now().timestamp() + 10 * 60)
+            .encode(STATE_SIGNING_KEY)
+            .unwrap();
+        assert!(matches!(
+            LinkState::decode_with_max_age(future, STATE_SIGNING_KEY, Duration::from_secs(60)),
+            Err(Error::InvalidState(_))
+        ));
     }
 
     #[test]
@@ -528,11 +536,16 @@ mod tests {
             "https://bot.example.com/callback",
         )
         .unwrap();
+        let mut extra = BTreeMap::new();
+        extra.insert(
+            "refresh_token".to_string(),
+            serde_json::Value::String("refresh-secret".to_string()),
+        );
         let token = AccessToken {
             access_token: "access-token".to_string(),
             token_type: Some("bearer".to_string()),
             scope: None,
-            extra: BTreeMap::new(),
+            extra,
         };
         let user = AuthorizedUser {
             external_user_id: 42_u64,
@@ -543,7 +556,9 @@ mod tests {
 
         assert!(!rendered.contains("client-secret"));
         assert!(!rendered.contains("access-token"));
+        assert!(!rendered.contains("refresh-secret"));
         assert!(!rendered.contains("user-token"));
+        assert!(rendered.contains("refresh_token"));
         assert!(rendered.contains("<redacted>"));
     }
 
@@ -584,6 +599,11 @@ mod tests {
         let requests = server.requests().await;
         assert_eq!(requests.len(), 1);
         assert!(requests[0].contains("GET /oauth2/access_token?"));
+        assert!(
+            requests[0]
+                .to_ascii_lowercase()
+                .contains(&format!("user-agent: {DEFAULT_USER_AGENT}"))
+        );
         assert!(requests[0].contains("client_id=client"));
         assert!(requests[0].contains("client_secret=secret"));
         assert!(requests[0].contains("grant_type=authorization_code"));
@@ -807,102 +827,5 @@ mod tests {
             .danger_accept_insecure_http_for_tests(true)
             .build()
             .unwrap()
-    }
-
-    struct MockServer {
-        base_url: Url,
-        requests: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl MockServer {
-        async fn spawn(responses: Vec<MockResponse>) -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            let requests = Arc::new(Mutex::new(Vec::new()));
-            let requests_for_task = requests.clone();
-
-            tokio::spawn(async move {
-                for response in responses {
-                    let (mut socket, _) = listener.accept().await.unwrap();
-                    let mut buf = vec![0_u8; 8192];
-                    let mut raw = Vec::new();
-                    loop {
-                        let n = socket.read(&mut buf).await.unwrap();
-                        if n == 0 {
-                            break;
-                        }
-                        raw.extend_from_slice(&buf[..n]);
-                        if raw.windows(4).any(|window| window == b"\r\n\r\n") {
-                            break;
-                        }
-                    }
-
-                    let request = String::from_utf8_lossy(&raw).to_string();
-                    requests_for_task.lock().await.push(request);
-                    socket
-                        .write_all(response.to_http().as_bytes())
-                        .await
-                        .unwrap();
-                    socket.shutdown().await.unwrap();
-                }
-            });
-
-            Self {
-                base_url: Url::parse(&format!("http://{addr}/")).unwrap(),
-                requests,
-            }
-        }
-
-        fn url(&self, path: &str) -> Url {
-            self.base_url.join(path.trim_start_matches('/')).unwrap()
-        }
-
-        async fn requests(&self) -> Vec<String> {
-            self.requests.lock().await.clone()
-        }
-    }
-
-    struct MockResponse {
-        status: u16,
-        headers: Vec<(&'static str, &'static str)>,
-        body: String,
-    }
-
-    impl MockResponse {
-        fn json(status: u16, headers: Vec<(&'static str, &'static str)>, body: &str) -> Self {
-            Self {
-                status,
-                headers,
-                body: body.to_string(),
-            }
-        }
-
-        fn to_http(&self) -> String {
-            let reason = match self.status {
-                200 => "OK",
-                400 => "Bad Request",
-                401 => "Unauthorized",
-                403 => "Forbidden",
-                429 => "Too Many Requests",
-                500 => "Internal Server Error",
-                _ => "OK",
-            };
-
-            let mut response = format!(
-                "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
-                self.status,
-                reason,
-                self.body.len()
-            );
-            for (name, value) in &self.headers {
-                response.push_str(name);
-                response.push_str(": ");
-                response.push_str(value);
-                response.push_str("\r\n");
-            }
-            response.push_str("\r\n");
-            response.push_str(&self.body);
-            response
-        }
     }
 }

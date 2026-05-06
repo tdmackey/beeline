@@ -122,11 +122,13 @@ pub struct AccessToken {
 
 impl fmt::Debug for AccessToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let extra_keys = self.extra.keys().collect::<Vec<_>>();
+
         f.debug_struct("AccessToken")
             .field("access_token", &"<redacted>")
             .field("token_type", &self.token_type)
             .field("scope", &self.scope)
-            .field("extra", &self.extra)
+            .field("extra_keys", &extra_keys)
             .finish()
     }
 }
