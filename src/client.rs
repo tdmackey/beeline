@@ -220,11 +220,9 @@ impl SwarmClientBuilder {
     }
 
     pub fn build(self) -> Result<SwarmClient> {
-        validate_endpoint(
-            "api_base_url",
-            &self.api_base_url,
-            self.allow_insecure_endpoints,
-        )?;
+        let api_base_url = normalize_base_url(self.api_base_url);
+
+        validate_endpoint("api_base_url", &api_base_url, self.allow_insecure_endpoints)?;
         validate_endpoint(
             "oauth_authorize_url",
             &self.oauth_authorize_url,
@@ -246,7 +244,7 @@ impl SwarmClientBuilder {
 
         Ok(SwarmClient {
             http,
-            api_base_url: self.api_base_url,
+            api_base_url,
             oauth_authorize_url: self.oauth_authorize_url,
             oauth_access_token_url: self.oauth_access_token_url,
             api_version: self.api_version,
@@ -329,6 +327,16 @@ fn validate_endpoint(name: &'static str, url: &Url, allow_insecure: bool) -> Res
         name,
         url: url.clone(),
     })
+}
+
+fn normalize_base_url(mut url: Url) -> Url {
+    if !url.path().ends_with('/') {
+        let mut path = url.path().to_string();
+        path.push('/');
+        url.set_path(&path);
+    }
+
+    url
 }
 
 fn map_api_error(status: StatusCode, rate_limit: RateLimit, body: &str) -> Error {
@@ -672,6 +680,35 @@ mod tests {
         assert!(raw.contains("v=20240101"));
         assert!(raw.contains("limit=10"));
         assert!(raw.contains("offset=5"));
+    }
+
+    #[tokio::test]
+    async fn normalizes_api_base_url_as_directory() {
+        let server = MockServer::spawn(vec![MockResponse::json(
+            200,
+            vec![],
+            r#"{"meta":{"code":200},"response":{"checkins":{"count":0,"items":[]}}}"#,
+        )])
+        .await;
+        let client = SwarmClient::builder()
+            .api_base_url(server.url("/v2"))
+            .oauth_authorize_url(server.url("/oauth2/authenticate"))
+            .oauth_access_token_url(server.url("/oauth2/access_token"))
+            .danger_accept_insecure_http_for_tests(true)
+            .build()
+            .unwrap();
+
+        client
+            .latest_checkins("token", CheckinsQuery::default())
+            .await
+            .unwrap();
+
+        let requests = server.requests().await;
+        assert!(
+            requests[0]
+                .to_ascii_lowercase()
+                .contains("get /v2/users/self/checkins?")
+        );
     }
 
     #[tokio::test]

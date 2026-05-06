@@ -112,7 +112,8 @@ impl LinkState {
             ));
         }
 
-        if now.saturating_sub(self.issued_at) > max_age_seconds as i64 {
+        let age_seconds = now.checked_sub(self.issued_at).unwrap_or(i64::MAX);
+        if age_seconds > max_age_seconds as i64 {
             return Err(Error::ExpiredState {
                 issued_at: self.issued_at,
                 max_age_seconds,
