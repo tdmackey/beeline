@@ -17,3 +17,7 @@ updates:
       time: "09:00"
       timezone: America/Los_Angeles
     open-pull-requests-limit: 5
+    ignore:
+      # This action tag is intentionally pinned to the crate MSRV.
+      # Rust version changes are a release-policy decision, not a routine dependency bump.
+      - dependency-name: dtolnay/rust-toolchain
